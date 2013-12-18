@@ -1,0 +1,1479 @@
+// All credit goes to James Peterson
+// This file is used to produce the input for the PDP16429
+// 16 bit Simulator
+
+/*
+  PDP-429 Assembler:
+
+  input is an assembly language program.  Each line is:
+
+  [label]:   opcodes    [operands]     // comment
+
+  symbols are labels and constants -- decimal, octal, hex, char
+
+  Output is an object file.
+*/
+
+
+
+/* standard environment for our coding */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdarg.h>
+#include <ctype.h>
+
+
+typedef short Boolean;
+#define TRUE 1
+#define FALSE 0
+
+
+typedef char *STRING;
+
+#define CAST(t,e) ((t)(e))
+#define TYPED_MALLOC(t) CAST(t*, malloc(sizeof(t)))
+
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+/* Types specific for the assembler */
+
+/* address type */
+typedef unsigned short ADDRESS;
+
+/* Instructions and  Data */
+typedef unsigned short WORD;
+
+
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+/* 
+   Assembler for PDP-429.  Opcode type definitions.
+*/
+
+/* ***************************************************************** */
+/* opcodes */
+
+
+enum opcode_kind {k_nrnm, k_mr, k_iot, k_nrm, k_rr, k_nmr, k_orig, k_end, k_indirect};
+
+struct opcode_table_entry
+{
+    struct opcode_table_entry *next;
+    const char       *name;
+    enum opcode_kind  class;
+    WORD  value;
+    WORD  mask;
+};
+typedef struct opcode_table_entry opcode;
+
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+/* 
+   Assembler for PDP-429.  Symbol table type definitions
+*/
+
+struct forward_reference_node
+{
+    struct forward_reference_node *next;
+    ADDRESS addr;
+    Boolean full;
+    int line_number;
+};
+
+
+struct symbol_table_entry
+{
+    struct symbol_table_entry *next;
+    char    *name;
+    ADDRESS  value;
+    struct forward_reference_node *fr;
+};
+
+typedef struct symbol_table_entry symbol;
+
+
+
+/* ***************************************************************** */
+/* 
+   token processing for the assembler
+   Take an input line, and break it up into tokens.
+*/
+
+
+/* Types for the token processing */
+
+/* tokens, for parsing */
+enum Token_type
+{
+    Tcolon,
+    Tcomma,
+    Topcode,
+    Tsymbol,
+    Tconstant,
+    Tcomment,
+    Tillegal
+};
+
+struct Token
+{
+    enum Token_type  type;
+    char *token_string;
+    opcode *op;
+    symbol *sy;
+    int    value;
+};
+typedef struct Token Token;
+
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+/* function prototypes */
+
+opcode *search_opcode(char *name);
+
+WORD Adjust_for_ZC(ADDRESS pc, WORD instruction, ADDRESS addr);
+
+symbol *search_symbol(char *name);
+void forward_reference(char *name, int line_number, ADDRESS reference_address, Boolean full);
+void Check_for_undefined_symbols(void);
+
+void Clear_Object_Code(void);
+void Define_Object_Code(ADDRESS addr, WORD inst, Boolean redefine);
+WORD Fetch_Object_Code(ADDRESS addr);
+void Output_Object_Code(void);
+
+
+int get_next_line(void);
+void finish_this_line(ADDRESS location_counter, WORD instruction);
+
+
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+/* MALLOC space for a string and copy it */
+
+STRING remember_string(const STRING name)
+{
+    size_t n;
+    STRING p;
+
+    if (name == NULL) return(NULL);
+
+    /* get memory to remember file name */
+    n = strlen(name) + 1;
+    p = CAST(STRING, malloc(n));
+    strcpy(p, name);
+    return(p);
+}
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+Boolean debug = FALSE;
+
+FILE *input;
+FILE *output;
+
+/* ***************************************************************** */
+/* error handling */
+
+int number_of_errors = 0;
+
+/* error printing */
+void error(char *fmt, ...)
+{
+    number_of_errors += 1;
+
+    va_list argp;
+    va_start(argp, fmt);
+    vfprintf(stderr, fmt, argp);
+}
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+/* The assembled instruction.  Plus do we actually have 
+   anything (good_stuff) or is there no output. */
+Boolean good_stuff;
+
+/* variables */
+int line_number;
+
+/* variables */
+ADDRESS entry_point;
+
+
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+/* 
+   token processing for the assembler
+   Take an input line, and break it up into tokens.
+*/
+
+
+char *input_buffer = NULL;
+int buffer_length = 0;
+int input_line_length = 0;
+int line_number;
+int token_index = 0;
+
+void save_char(char c)
+{
+    /* make sure we have room for this character in the input buffer */
+    if (input_line_length >= buffer_length-1)
+        {
+            if (buffer_length == 0)
+                buffer_length = 256;
+            else
+                buffer_length = 2*buffer_length;
+            input_buffer = realloc(input_buffer, buffer_length);
+        }
+    input_buffer[input_line_length] = c;
+    input_line_length += 1;
+}
+
+/* read the next line of input, and set the token pointer to the
+   beginning of the line */
+int get_next_line(void)
+{
+    int c;
+    while (((c = getc(input)) != EOF) && (c != '\n'))
+        {
+            save_char(c);
+        }
+    save_char('\0');
+    line_number += 1;
+    token_index = 0;
+    
+    if ((c == EOF) || (input_line_length == 0))
+        return(EOF);
+    else
+        return(input_line_length);
+}
+
+/* print out this line and it's contents (if there are any) */
+void finish_this_line(ADDRESS location_counter, WORD instruction)
+{
+    fprintf(stdout, "  ");
+    if (good_stuff)
+        {
+            fprintf(stdout, "0x%04X: 0x%04X", location_counter, instruction);
+        }
+    else
+        {
+            fprintf(stdout, "            ");
+        }
+    fprintf(stdout, "%5d: %s\n", line_number, input_buffer);
+
+    input_line_length = 0;
+}
+
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+char *copy_token_string(int i, int j)
+{
+    /* change j to '\0', so we can copy the string */
+    char save = input_buffer[j+1];
+    input_buffer[j+1]= '\0';
+    char *s = remember_string(&input_buffer[i]);
+    /* restore the input string, and update to just beyond this token */
+    input_buffer[j+1] = save;
+    return(s);
+}
+
+/* look at the next token to see what it will be */
+/* only need to look one character ahead */
+enum Token_type peek_token_type(void)
+{
+    /* skip any leading spaces */
+    while ((token_index < input_line_length) && isspace(input_buffer[token_index]))
+        token_index += 1;
+
+    /* check for an empty line */
+    if (token_index >= input_line_length)  return(Tillegal);
+
+    int c = input_buffer[token_index];
+    if (c == '\0') return(Tillegal);
+
+    /* colons are for labels */
+    if (c == ':')   return(Tcolon);
+    if (c == ',')   return(Tcomma);
+
+    /* check for comments */
+    if (c == '/')   return(Tcomment);
+
+    /* by symbol, we mean symbol or number */
+    if (isalpha(c)) return(Tsymbol);
+    if (isdigit(c)) return(Tsymbol);
+    if (c == '\'') return(Tsymbol);
+
+    return(Tillegal);
+}
+
+
+
+/* check for constants of different bases: 8, 10, 16 */
+Boolean is_valid_digit(char c, int base)
+{
+    switch(base)
+        {
+        case 16:
+            if (('A' <= c) && (c <= 'F')) return(TRUE);
+            if (('a' <= c) && (c <= 'f')) return(TRUE);
+        case 10:
+            if (('8' <= c) && (c <= '9')) return(TRUE);
+        case 8:
+            if (('0' <= c) && (c <= '7')) return(TRUE);
+        case 2:
+            if (('0' <= c) && (c <= '1')) return(TRUE);
+        }
+    return(FALSE);
+}
+
+int digit_value(char c, int base)
+{
+    switch(base)
+        {
+        case 16:
+            if (('A' <= c) && (c <= 'F')) return(10+c-'A');
+            if (('a' <= c) && (c <= 'f')) return(10+c-'a');
+        case 10:
+            if (('8' <= c) && (c <= '9')) return(c-'0');
+        case 8:
+            if (('0' <= c) && (c <= '7')) return(c-'0');
+        case 2:
+            if (('0' <= c) && (c <= '1')) return(c-'0');
+        }
+    return(-1);
+}
+
+
+
+/* read a constant from the input buffer */
+Boolean parse_constant(Token *t, int *value)
+{
+    /* remember where it starts */
+    int b0 = token_index;
+    int base = 10;
+    int n = 0;
+    int sign = 1;
+
+    /* negative numbers */
+    if (input_buffer[token_index] == '-')
+        {
+            sign = -1;
+            token_index += 1;
+        }
+    if (input_buffer[token_index] == '+')
+        {
+            sign = +1;
+            token_index += 1;
+        }
+
+    /* base is decimal unless ... */
+    if (input_buffer[token_index] == '0')
+        {
+            /* 0...  -- octal */
+            token_index += 1;
+            base = 8;
+            if ((input_buffer[token_index] == 'x') || (input_buffer[token_index] == 'X'))
+                {
+                    /* 0x...  -- hex */
+                    token_index += 1;
+                    base = 16;
+                }
+            else if (input_buffer[token_index] == 'b')
+                {
+                    /* 0b...  -- binary */
+                    token_index += 1;
+                    base = 2;
+                }
+        }
+
+    /* read number (in the defined base) */
+    while (is_valid_digit(input_buffer[token_index], base))
+        {
+            n = n * base + digit_value(input_buffer[token_index], base);
+            token_index += 1;            
+        }
+    *value = sign * n;
+
+    t->token_string = copy_token_string(b0, token_index);    
+
+    if (isalpha(input_buffer[token_index]))
+        return(FALSE);
+    else
+        return(TRUE);
+}
+
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+void get_token(Token *t)
+{
+    /* check if we need to free the previous string */
+    if (t->token_string != NULL)
+        {
+            free(t->token_string);
+            t->token_string = NULL;
+        }
+    t->op = NULL;
+    t->sy = NULL;
+    t->value = 0;
+
+    enum Token_type a = peek_token_type();
+    if (a != Tsymbol)
+        {
+            t->type = a;
+            t->token_string = copy_token_string(token_index, token_index);
+            token_index += 1;
+            if (debug) fprintf(stderr, "next token: %s\n", t->token_string);
+            return;
+        }
+
+    if (isalpha(input_buffer[token_index]))
+        {
+            int j;
+            for (j = token_index; j < input_line_length; j++)
+                {
+                    if (isalpha(input_buffer[j])) continue;
+                    if (isdigit(input_buffer[j])) continue;
+                    if (input_buffer[j] == '_') continue;
+                    if (input_buffer[j] == '.') continue;
+                    /* not alpha, digit or underbar or period */
+                    break;
+                }
+            /* symbol is from token_index to j-1 */
+            t->token_string = copy_token_string(token_index, j-1);
+            token_index = j;
+            if (debug) fprintf(stderr, "next token: %s\n", t->token_string);
+
+            /* search to see if this token is an opcode */
+            opcode *op = search_opcode(t->token_string);
+            if (op != NULL)
+                {
+                    t->type = Topcode;
+                    t->op = op;
+                    return;
+                }
+
+            /* search to see if this token is a known symbol */
+            symbol *sy = search_symbol(t->token_string);
+            if (sy != NULL)
+                {
+                    t->type = Tsymbol;
+                    t->sy = sy;
+                    t->value = sy->value;
+                    return;
+                }
+
+            /* we have a symbol that is not currently defined */
+            t->type = Tsymbol;
+            t->sy = NULL;
+            t->value = 0;
+            return;
+        }
+
+    /* A numeric constant */
+    else if (isdigit(input_buffer[token_index]) || (input_buffer[token_index] == '-'))
+        {
+            int value;
+            if (parse_constant(t, &value))
+                {
+                    t->type = Tconstant;
+                    t->value = value;
+                    if (debug) fprintf(stderr, "next token: constant %d\n", t->value);
+                    return;
+                }
+        }
+
+    /* A character constant: '.'  */
+    else if ((input_buffer[token_index] == '\'') && (input_buffer[token_index+2] == '\''))
+        {
+            t->type = Tconstant;
+            t->value = input_buffer[token_index+1];
+            t->token_string = malloc(4);
+            t->token_string[0] = t->token_string[2] = '\'';
+            t->token_string[1] = t->value;
+            t->token_string[3] = '\0';
+            token_index += 3;
+            if (debug) fprintf(stderr, "next token: char constant %d (%c)\n", t->value, t->value);
+            return;
+        }
+
+    /* and anything else is just illegal */
+    /* should we advance the token_index here? */
+    t->type = Tillegal;
+    if (debug) fprintf(stderr, "next token: illegal\n");
+    return;
+}
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+/* 
+   Assembler for PDP-429.  Opcode definition and handling.
+*/
+
+
+opcode *Root_OP = NULL;
+
+
+/* ***************************************************************** */
+/*                                                                   */
+opcode *search_opcode(char *name)
+{
+    opcode *o;
+    for (o = Root_OP; o != NULL; o = o->next)
+        if (strcasecmp(name, o->name) == 0) break;
+    return(o);
+}
+
+
+/* ***************************************************************** */
+/*                                                                   */
+void define_opcode(char *name, enum opcode_kind kind, WORD op, WORD mask)
+{
+    opcode *o;
+
+    o = search_opcode(name);
+    if (o != NULL)
+        {
+            fprintf(stderr, "opcode %s redefined; old value = 0x%04X, new value = 0x%04X\n", name, o->value, op);
+        }
+    else
+        {
+            o = TYPED_MALLOC(opcode);
+        }
+    o->name = name;
+    o->class = kind;
+    o->value = op;
+    o->mask = mask;
+    o->next = Root_OP;
+    Root_OP = o;
+}
+
+
+/* for each opcode, we need it's name, what type of
+   opcode it is, it's numeric opcode, and what bits
+   of the numeric opcode are important. */
+
+void Initialize_Opcode_Table(void)
+{
+    define_opcode("ORIG", k_orig,    0x000, 0x000);
+    define_opcode("END", k_end,      0x000, 0x000);
+    define_opcode("I", k_indirect,   0x200, 0x000);
+
+    define_opcode("NOP", k_nrnm, 0x0000, 0xFFFF);
+    define_opcode("HLT", k_nrnm, 0x0001, 0xFFFF);
+    define_opcode("RET", k_nrnm, 0x0002, 0xFFFF);
+    define_opcode("ADDA", k_mr, 0x1000, 0xFCFF);
+    define_opcode("ADDB", k_mr, 0x1400, 0xFCFF);
+    define_opcode("ADDC", k_mr, 0x1800, 0xFCFF);
+    define_opcode("ADDD", k_mr, 0x1C00, 0xFCFF);
+    define_opcode("SUBA", k_mr, 0x2000, 0xFCFF);
+    define_opcode("SUBB", k_mr, 0x2400, 0xFCFF);
+    define_opcode("SUBC", k_mr, 0x2800, 0xFCFF);
+    define_opcode("SUBD", k_mr, 0x2C00, 0xFCFF);
+    define_opcode("MULA", k_mr, 0x3000, 0xFCFF);
+    define_opcode("MULB", k_mr, 0x3400, 0xFCFF);
+    define_opcode("MULC", k_mr, 0x3800, 0xFCFF);
+    define_opcode("MULD", k_mr, 0x3C00, 0xFCFF);
+    define_opcode("DIVA", k_mr, 0x4000, 0xFCFF);
+    define_opcode("DIVB", k_mr, 0x4400, 0xFCFF);
+    define_opcode("DIVC", k_mr, 0x4800, 0xFCFF);
+    define_opcode("DIVD", k_mr, 0x4C00, 0xFCFF);
+    define_opcode("ANDA", k_mr, 0x5000, 0xFCFF);
+    define_opcode("ANDB", k_mr, 0x5400, 0xFCFF);
+    define_opcode("ANDC", k_mr, 0x5800, 0xFCFF);
+    define_opcode("ANDD", k_mr, 0x5C00, 0xFCFF);
+    define_opcode("ORA", k_mr, 0x6000, 0xFCFF);
+    define_opcode("ORB", k_mr, 0x6400, 0xFCFF);
+    define_opcode("ORC", k_mr, 0x6800, 0xFCFF);
+    define_opcode("ORD", k_mr, 0x6C00, 0xFCFF);
+    define_opcode("XORA", k_mr, 0x7000, 0xFCFF);
+    define_opcode("XORB", k_mr, 0x7400, 0xFCFF);
+    define_opcode("XORC", k_mr, 0x7800, 0xFCFF);
+    define_opcode("XORD", k_mr, 0x7C00, 0xFCFF);
+    define_opcode("LDA", k_mr, 0x8000, 0xFCFF);
+    define_opcode("LDB", k_mr, 0x8400, 0xFCFF);
+    define_opcode("LDC", k_mr, 0x8800, 0xFCFF);
+    define_opcode("LDD", k_mr, 0x8C00, 0xFCFF);
+    define_opcode("STA", k_mr, 0x9000, 0xFCFF);
+    define_opcode("STB", k_mr, 0x9400, 0xFCFF);
+    define_opcode("STC", k_mr, 0x9800, 0xFCFF);
+    define_opcode("STD", k_mr, 0x9C00, 0xFCFF);
+    define_opcode("IOTA", k_iot, 0xA000, 0xFC00);
+    define_opcode("IOTB", k_iot, 0xA400, 0xFC00);
+    define_opcode("IOTC", k_iot, 0xA800, 0xFC00);
+    define_opcode("IOTD", k_iot, 0xAC00, 0xFC00);
+    define_opcode("ISZ", k_nrm, 0xB000, 0xFC00);
+    define_opcode("JMP", k_nrm, 0xB400, 0xFC00);
+    define_opcode("CALL", k_nrm, 0xB800, 0xFC00);
+    define_opcode("PUSH", k_nrm, 0xC000, 0xFC00);
+    define_opcode("POP", k_nrm, 0xC400, 0xFC00);
+    define_opcode("MOD", k_rr, 0xE000, 0xFE00);
+    define_opcode("ADD", k_rr, 0xE200, 0xFE00);
+    define_opcode("SUB", k_rr, 0xE400, 0xFE00);
+    define_opcode("MUL", k_rr, 0xE600, 0xFE00);
+    define_opcode("DIV", k_rr, 0xE800, 0xFE00);
+    define_opcode("AND", k_rr, 0xEA00, 0xFE00);
+    define_opcode("OR", k_rr, 0xEC00, 0xFE00);
+    define_opcode("XOR", k_rr, 0xEE00, 0xFE00);
+    define_opcode("INA", k_nmr, 0xF001, 0xFC01);
+    define_opcode("DCA", k_nmr, 0xF002, 0xFC02);
+    define_opcode("CML", k_nmr, 0xF004, 0xF004);
+    define_opcode("CMA", k_nmr, 0xF008, 0xFC08);
+    define_opcode("CLL", k_nmr, 0xF010, 0xF010);
+    define_opcode("CLA", k_nmr, 0xF020, 0xFC20);
+    define_opcode("RSS", k_nmr, 0xF040, 0xF040);
+    define_opcode("SNL", k_nmr, 0xF080, 0xF080);
+    define_opcode("SZA", k_nmr, 0xF100, 0xFD00);
+    define_opcode("SMA", k_nmr, 0xF200, 0xFE00);
+    define_opcode("INB", k_nmr, 0xF401, 0xFC01);
+    define_opcode("DCB", k_nmr, 0xF402, 0xFC02);
+    define_opcode("CMB", k_nmr, 0xF408, 0xFC08);
+    define_opcode("CLB", k_nmr, 0xF420, 0xFC20);
+    define_opcode("SZB", k_nmr, 0xF500, 0xFD00);
+    define_opcode("SMB", k_nmr, 0xF600, 0xFE00);
+    define_opcode("INC", k_nmr, 0xF801, 0xFC01);
+    define_opcode("DCC", k_nmr, 0xF802, 0xFC02);
+    define_opcode("CMC", k_nmr, 0xF808, 0xFC08);
+    define_opcode("CLC", k_nmr, 0xF820, 0xFC20);
+    define_opcode("SZC", k_nmr, 0xF900, 0xFD00);
+    define_opcode("SMC", k_nmr, 0xFA00, 0xFE00);
+    define_opcode("IND", k_nmr, 0xFC01, 0xFC01);
+    define_opcode("DCD", k_nmr, 0xFC02, 0xFC02);
+    define_opcode("CMD", k_nmr, 0xFC08, 0xFC08);
+    define_opcode("CLD", k_nmr, 0xFC20, 0xFC20);
+    define_opcode("SZD", k_nmr, 0xFD00, 0xFD00);
+    define_opcode("SMD", k_nmr, 0xFE00, 0xFE00);
+}
+
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+/* 
+   Assembler for PDP-429.  Symbol table and forward references.
+*/
+
+symbol *Root_ST = NULL;
+
+symbol *search_symbol(char *name)
+{
+    symbol *s;
+    for (s = Root_ST; s != NULL; s = s->next)
+        if (strcasecmp(name, s->name) == 0) break;
+
+    return(s);
+}
+
+symbol *insert_symbol(char *name)
+{
+    symbol *s;
+    
+    s = TYPED_MALLOC(symbol);
+    s->name = remember_string(name);
+    s->value = 0;
+    s->fr = NULL;
+    s->next = Root_ST;
+    Root_ST = s;
+    
+    return(s);
+}
+
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+void  handle_forward_references(symbol *s)
+{
+    /* plug the new address into those instructions
+       that referenced it */
+    while (s->fr != NULL)
+        {
+            /* remove the forward note from the list */
+            struct forward_reference_node *fr = s->fr;
+            s->fr = fr->next;
+            if (fr->full)
+                Define_Object_Code(fr->addr, s->value, TRUE);
+            else
+                {
+                    WORD inst = Fetch_Object_Code(fr->addr);
+                    inst = Adjust_for_ZC(fr->addr, inst, s->value);
+                    Define_Object_Code(fr->addr, inst, TRUE);
+                }
+            free(fr);
+        }
+}
+
+void forward_reference(char *name, int line_number, ADDRESS reference_address, Boolean full)
+{
+    if (debug) fprintf(stderr, "%s forward reference to %s at line %d, address 0x%04X\n", 
+                       (full ? "full" : "page"),
+                       name, line_number, reference_address);
+
+    /* get a symbol table entry; define one if necessary */
+    symbol *s = search_symbol(name);
+    if (s == NULL)
+        s = insert_symbol(name);
+    
+    struct forward_reference_node *fr = TYPED_MALLOC(struct forward_reference_node);
+    fr->addr = reference_address;
+    fr->full = full;
+    fr->line_number = line_number;
+
+    /* link this into the list */
+    fr->next = s->fr;
+    s->fr = fr;
+}
+
+
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+
+void define_symbol(char *name, ADDRESS value)
+{
+    symbol *s = search_symbol(name);
+
+    if (s == NULL)
+        s = insert_symbol(name);
+    else if (s->fr == NULL)
+        {
+            error("symbol %s redefined; old value = 0x%04X, new value = 0x%04X\n", name, s->value, value);
+        }
+    else
+        {
+            if (debug) fprintf(stderr, "symbol %s defined; value = 0x%04X\n", s->name, s->value);
+        }
+    
+    /* define the new value */
+    s->value = value;
+
+    /* if there were forward references, walk the list and define them */
+    if (s->fr != NULL)
+        {
+            handle_forward_references(s);
+        }
+}
+
+
+
+/* There are some pre-defined symbols -- PC, SP, SPL, PSW */
+
+void Initialize_Symbol_Table(void)
+{
+    define_symbol("A", 0x0);
+    define_symbol("B", 0x1);
+    define_symbol("C", 0x2);
+    define_symbol("D", 0x3);
+    define_symbol("PC", 0x4);
+    define_symbol("PSW", 0x5);
+    define_symbol("SP", 0x6);
+    define_symbol("SPL", 0x7);
+}
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+
+void Check_for_undefined_symbols(void)
+{
+    /* walk the entire symbol table */
+    /* look to see if anyone has an non-empty list of forward references */
+    symbol *s;
+    for (s = Root_ST; s != NULL; s = s->next)
+        if (s->fr != NULL)
+            {
+                error("Undefined symbol %s used at line %d\n",
+                      s->name, s->fr->line_number);
+            }
+}
+
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+/* 
+   Assembler for PDP-429.  Memory and object file creation header file
+*/
+
+/* we want to assemble instructions.  We could assemble and output them
+   all at once.  But we have a problem of forward references.  So we
+   keep the (partially) assembled instructions in an array of them,
+   essentially simulated memory.  That allows us to come back and 
+   fix them up when the forward reference is resolved.
+
+   We need to know which memory locations are from assembled
+   instructions, and which are just empty; so each memory location
+   has a bit (defined/not defined).
+*/
+
+#define MEMORY_SIZE 65536
+
+WORD     memory[MEMORY_SIZE];
+Boolean defined[MEMORY_SIZE];
+ADDRESS entry_point = 0;
+
+
+void Clear_Object_Code(void)
+{
+    int i;
+    for (i = 0; i < MEMORY_SIZE; i++)
+        {
+            defined[i] = FALSE;
+        }
+}
+
+void Define_Object_Code(ADDRESS addr, WORD inst, Boolean redefine)
+{
+    if (debug)
+        fprintf(stderr, "object code: 0x%04X = 0x%04X\n", addr, inst);
+    if (defined[addr] && !redefine)
+        {
+            error("redefined memory location: 0x%04X: was 0x%04X; new value 0x%04X\n",
+                  addr, memory[addr], inst);
+        }
+                
+    defined[addr] = TRUE;
+    memory[addr] = inst;
+}
+
+WORD Fetch_Object_Code(ADDRESS addr)
+{
+    WORD inst;
+
+    if (defined[addr])
+        inst = memory[addr];
+    else
+        inst = 0;
+
+    if (debug)
+        fprintf(stderr, "read object code: 0x%04X = 0x%04X\n", addr, inst);
+    return(inst);
+}
+
+
+void put2(WORD n)
+{
+    /* split n into two 8-bit parts */
+    int u8 = (n >> 8) & 0xFF;
+    int l8 = (n >> 0) & 0xFF;
+    putc(u8,output);
+    putc(l8,output);
+}
+
+
+
+void Output_Object_Code(void)
+{
+    if (debug) fprintf(stderr, "Start object file output\n");
+    putc('O',output); 
+    putc('B',output); 
+    putc('J',output); 
+    putc('G',output);
+    put2(entry_point);
+
+    int i, j;
+    for (i = 0; i < MEMORY_SIZE; i++)
+        {
+            if (defined[i])
+                {
+                    /* find the next undefined word */
+                    j = i;
+                    while ((j < MEMORY_SIZE) && defined[j] && (j-i < (255-3)/2))
+                        j = j + 1;
+                    /* output from i to j-1 (inclusive) */
+                    int n = 1 + 2 + 2*(j-i);
+                    if (debug) fprintf(stderr, "Output block of %d bytes at 0x%04X\n", n, i);
+                    putc(n,output);
+                    put2(i);
+                    while (i < j)
+                        {
+                            if (debug) fprintf(stderr, "Output word: 0x%04X: 0x%04X\n", i, memory[i]);
+                            put2(memory[i]);
+                            i = i + 1;
+                        }
+                    i = j-1;
+                }
+        }
+}
+
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+#define PAGE_BITS 0xFF00
+#define ZC_BIT    0x0100
+
+WORD Adjust_for_ZC(ADDRESS pc, WORD instruction, ADDRESS addr)
+{
+    ADDRESS addr_page = (addr & PAGE_BITS);
+    ADDRESS curr_page = (pc   & PAGE_BITS);
+    /* set the Z/C bit for this address */
+    if (addr_page == 0)
+        {
+            /* set Z/C bit to zero */
+            instruction = instruction & ~(ZC_BIT);
+        }
+    else if (addr_page == curr_page)
+        {
+            /* set Z/C bit to one */
+            instruction = instruction | ZC_BIT;
+        }
+    else
+        {
+            error("ADDRESS is not on zero or current page: ADDRESS page = 0x%3X, Current page = 0x%3X\n", 
+                  addr_page, curr_page);
+        }
+    
+    /* add in address page offset to the instruction */
+    instruction = instruction | (addr & ~PAGE_BITS);
+
+    return(instruction);
+}
+
+
+/* ***************************************************************** */
+
+/* where the current instruction should go in memory */
+ADDRESS location_counter = 0;
+
+/* The instruction being assembled */
+WORD instruction;
+
+/* As we assemble the instruction, the bits may be either fixed
+   (as either 0 or 1), or not yet known.  For example if we have
+   SMA, we know it is an operate group 2, and the SMA bit is set,
+   but we don't know which (if any) of the other group 2 opcodes
+   will be set.  So we know the opcode (0x111...)  and the group
+   2 opcode bit (0x...1....), and the SMA bit (0x.....1...), but
+   the other bits are not known (and hence are not yet fixed).
+*/
+WORD fixed_bits;
+
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+void do_nrnm(Token *t)
+{
+    /* non-register, non-memory instruction */
+    good_stuff = TRUE;
+
+    /* just the opcode */
+    instruction = t->op->value;
+    
+    /* get the next token */
+    get_token(t);
+}
+
+void do_mr(Token *t)
+{
+    /* register memory reference instructions */
+    /* ADDA, SUBA, ..., STD   I address */
+    /* The register is already in the opcode */
+    ADDRESS addr;
+    
+    good_stuff = TRUE;
+
+    /* first the opcode */
+    instruction = t->op->value;
+    
+    /* check for indirect */
+    get_token(t);
+    if ((t->type == Topcode) && (t->op->class == k_indirect))
+        {
+            instruction = instruction | t->op->value;
+            get_token(t);
+        }
+    
+    if (t->type == Tconstant) 
+        {
+            addr = t->value;
+        }
+    else if (t->type == Tsymbol)
+        {
+            if ((t->sy == NULL) || (t->sy->fr != NULL))
+                {
+                    forward_reference(t->token_string, line_number, location_counter, FALSE);
+                }
+            addr = t->value;
+        }
+    else
+        {
+            error("Memory reference instruction operand must be constant or symbol\n");
+            addr = 0;
+        }
+
+    instruction = Adjust_for_ZC(location_counter, instruction, addr);
+
+    /* get the next token */
+    get_token(t);
+}
+
+void do_nrm(Token *t)
+{
+    /* non-register memory reference instructions */
+    /* ISZ, JMP, CALL, PUSH, POP */
+
+    /* looks the same as register memory reference instruction */
+    do_mr(t);
+}
+
+void do_rr(Token *t)
+{
+    /* register to register instructions */
+    /* MOD, ADD, SUB, MUL, DIV, AND, OR, XOR */
+    /* opcode ri, rj, rk */
+    /* we treat A, B, C, D, PC, SP, SPL, PSW as symbols */
+    good_stuff = TRUE;
+    instruction = t->op->value;
+
+    get_token(t);
+    if ((t->type == Tsymbol) && (t->value < 0) && (7 < t->value)) error("register i is not in range");
+    else instruction = instruction | (t->value << 6);
+
+    get_token(t);
+    if (t->type == Tcomma) get_token(t);
+    if ((t->type == Tsymbol) && (t->value < 0) && (7 < t->value)) error("register j is not in range");
+    else instruction = instruction | (t->value << 3);
+
+    get_token(t);
+    if (t->type == Tcomma) get_token(t);
+    if ((t->type == Tsymbol) && (t->value < 0) && (7 < t->value)) error("register k is not in range");
+    else instruction = instruction | (t->value << 0);
+
+    /* get the next token */
+    get_token(t);
+}
+
+void do_nmr(Token *t)
+{
+    /* Non-memory register instructions */
+    /* SMA, SZA, SNL, RSS, CLA, CLL, CMA, CML, DCA, ICA, ... */
+
+    good_stuff = TRUE;
+
+    fixed_bits = t->op->mask;
+    instruction = t->op->value & fixed_bits;
+    
+    /* get all the opcodes for the micro-opcodes and OR them together */
+    /* but don't allow opcodes that define bits in conflict with each other */
+    do {
+        /* check if more than one wants to define some bits */
+        WORD conflicts = fixed_bits & t->op->mask;
+        if (conflicts != 0)
+            {
+                /* see if they both want the bits the same, or different */
+                if ((instruction & conflicts) != (t->op->value & conflicts))
+                    {
+                        error("incompatible opcodes at line %d\n", line_number);
+                    }
+            }
+        instruction = instruction | t->op->value;
+        fixed_bits = fixed_bits | t->op->mask;
+        
+        get_token(t);
+        if (t->type == Tcomma) get_token(t);
+    } while (t->type == Topcode);
+}
+
+void do_iot(Token *t)
+{
+    int device = 0;
+    int function = 0;
+    
+    /* IO instruction;  IOT device function */
+    good_stuff = TRUE;
+    instruction = t->op->value;
+    
+    get_token(t);
+    if (t->type != Tconstant)
+        {
+            error("IOT device operand must be constant\n");
+        }
+    else
+        device = t->value;
+    instruction = instruction | ((device & 0x7F) << 3);
+    
+    enum Token_type pt = peek_token_type();
+    get_token(t);
+    if (pt == Tcomma) get_token(t);
+
+    /* if the next token is a comment, then the function field is not given */
+    if (t->type != Tcomment)
+        {
+            if (t->type != Tconstant)
+                {
+                    error("IOT function operand must be constant\n");
+                }
+            else
+                function = t->value;
+        }
+    instruction = instruction | (function & 0x3);
+
+    /* get the next token */
+    get_token(t);
+}
+
+void do_orig(Token *t)
+{
+    /* ORIG value */
+    good_stuff = FALSE;
+    
+    get_token(t);
+    if (t->type != Tconstant)
+        {
+            error("ORIG operand must be constant\n");
+        }
+    else
+        location_counter = t->value;
+
+    /* get the next token */
+    get_token(t);
+}
+
+void do_end(Token *t)
+{
+    /* END value  or END symbol */
+    good_stuff = FALSE;
+    
+    get_token(t);
+    if (t->type == Tconstant) 
+        {
+            entry_point = t->value;
+        }
+    else if (t->type == Tsymbol)
+        {
+            if ((t->sy == NULL) || (t->sy->fr != NULL))
+                {
+                    forward_reference(t->token_string, line_number, location_counter, TRUE);
+                }
+            entry_point = t->value;
+        }
+    else
+        {
+            error("END operand must be constant or symbol\n");
+        }
+
+    /* get the next token */
+    get_token(t);
+}
+
+void do_indirect(Token *t)
+{
+    good_stuff = FALSE;
+    error("Missing memory reference opcode with apparent indirect address\n");
+}
+
+
+
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+void do_opcode(Token *t)
+{
+    switch (t->op->class)
+        {
+        case k_nrnm:
+            do_nrnm(t);
+            break;
+            
+        case k_mr:
+            do_mr(t);
+            break;
+            
+        case k_iot:
+            do_iot(t);
+            break;
+            
+        case k_nrm:
+            do_nrm(t);
+            break;
+            
+        case k_rr:
+            do_rr(t);
+            break;
+            
+        case k_nmr:
+            do_nmr(t);
+            break;
+            
+        case k_orig:
+            do_orig(t);
+            break;
+            
+        case k_end:
+            do_end(t);
+            break;
+            
+        case k_indirect:
+            do_indirect(t);
+            break;
+        }
+}
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+void Assemble_File(STRING name)
+{
+    Token t1;
+    t1.token_string = NULL;
+
+    number_of_errors = 0;
+    line_number = 0;
+
+    while (get_next_line() != EOF)
+        {
+            /* get the token to process */
+            get_token(&t1);
+
+            /* look at the next token, is this a label ? */
+            enum Token_type t = peek_token_type();
+            while (t == Tcolon)
+                {
+                    define_symbol(t1.token_string, location_counter);
+                    /* skip colon */
+                    get_token(&t1);
+                    /* and get the next symbol (if any) */
+                    get_token(&t1);
+                    t = peek_token_type();
+                }
+
+            /* starting an instruction */
+            good_stuff = FALSE;
+            instruction = 0;
+            fixed_bits = 0;
+
+            while ((t1.type == Topcode) || (t1.type == Tsymbol) || (t1.type == Tconstant))
+                {
+                    /* not a label -- do what you can for it */
+                    switch (t1.type)
+                        {
+                        case Topcode:
+                            /* if we already have good stuff here, why do we have another opcode? */
+                            if (good_stuff)
+                                {
+                                    error("yet another opcode at line %d\n", line_number);
+                                }
+
+                            do_opcode(&t1);
+                            break;
+                            
+                        case Tsymbol:
+                            if ((t1.sy == NULL) || (t1.sy->fr != NULL))
+                                {
+                                    forward_reference(t1.token_string, line_number, location_counter, TRUE);
+                                }
+                            
+                        case Tconstant:
+                            /* if we already have good stuff here, why do we have another constant
+                               or symbol ? */
+                            if (good_stuff)
+                                {
+                                    error("illegal token (%s) at line %d\n", t1.token_string, line_number);
+                                }
+
+                            good_stuff = TRUE;
+                            instruction = (t1.value & 0xFFFF);
+                            fixed_bits = 0xFFFF;
+                            get_token(&t1);
+                            break;
+
+                        default:
+                            error("illegal token (%s) at line %d\n", t1.token_string, line_number);
+                            t1.type = Tillegal;
+                            break;
+                        }
+                }
+
+            /* check if this line is just a comment */
+            finish_this_line(location_counter, instruction);
+            
+            if (good_stuff)
+                {
+                    Define_Object_Code(location_counter, instruction, FALSE);
+                    location_counter += 1;
+                }
+        }
+
+    /* last little bit of allocated memory */
+    if (t1.token_string != NULL)
+        {
+            free(t1.token_string);
+            t1.token_string = NULL;
+        }
+
+}
+
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+void scanargs(STRING s)
+{
+    /* check each character of the option list for
+       its meaning. */
+
+    while (*++s != '\0')
+        switch (*s)
+            {
+
+            case 'D': /* debug option */
+                debug = TRUE;
+                break;
+
+            default:
+                fprintf (stderr,"asm: Bad option %c\n", *s);
+                fprintf (stderr,"usage: asm [-D] file\n");
+                exit(1);
+            }
+}
+
+
+char *change_file_name(STRING name, STRING old_ext, STRING new_ext)
+{
+    /* need enough space for the new extension */
+    int n = strlen(name) + strlen(old_ext) + 1;
+    
+    /* make the copy */
+    char *news = malloc(n);
+    strcpy(news, name);
+
+    /* can we find the old extension in this file ? */
+    char *oldxs = strstr(news, old_ext);
+    if (oldxs == NULL)
+        {
+            /* there is no old extension; add the new extension */
+            news = strcat(news, new_ext);
+        }
+    else
+        {
+            while (*new_ext != '\0')
+                *oldxs++ = *new_ext++;
+            *oldxs = '\0';
+            /* find the old extension in the old string */
+            char *p = strstr(name, old_ext);
+            /* and add the part after that to the new string */
+            strcat(oldxs, &p[strlen(old_ext)]);
+        }
+    return(news);
+}
+
+
+/* ***************************************************************** */
+/*                                                                   */
+/*                                                                   */
+/* ***************************************************************** */
+
+int main(int argc, STRING *argv)
+{
+
+    Initialize_Opcode_Table();
+    Initialize_Symbol_Table();
+
+    /* main driver program.  Define the input file
+       from either standard input or a name on the
+       command line.  Process all arguments. */
+
+    while (argc > 1)
+        {
+            argc--, argv++;
+            if (**argv == '-')
+                scanargs(*argv);
+            else
+                {
+                    input = fopen(*argv,"r");
+                    if (input == NULL)
+                        {
+                            fprintf (stderr, "Can't open %s\n",*argv);
+                            continue;
+                        }
+                    char *out_filename = change_file_name(*argv, ".asm", ".obj");
+                    output = fopen(out_filename,"w");
+                    if (output == NULL)
+                        {
+                            fprintf (stderr, "Can't open %s\n",out_filename);
+                            continue;
+                        }
+
+                    /* process the input assembly file */
+                    Clear_Object_Code();
+                    Assemble_File(*argv);
+                    Check_for_undefined_symbols();
+                    if (number_of_errors > 0)
+                        fprintf(stderr, "*** %d errors in assembly\n", number_of_errors);
+
+                    Output_Object_Code();
+
+                    fclose(input);
+                    fclose(output);
+                    free(out_filename);
+                }
+        }
+
+    exit(0);
+}
