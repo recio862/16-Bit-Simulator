@@ -1,0 +1,39 @@
+        ORIG 0x40
+ZERO:	0
+TOZERO:	ZERO
+TMP:	0
+		
+        ORIG 0x1000
+MSP:	0xFFFF
+MSPL:	0XFFFC
+        
+begin:  NOP
+		// set up stack pointer and stack limit
+		LDA   MSP    
+		AND   SP,A,A
+		LDD   MSPL
+		OR    SPL,D,D
+
+		PUSH TOZERO
+		PUSH TOZERO
+		PUSH TOZERO
+		PUSH TOZERO
+		PUSH TOZERO
+		PUSH TOZERO
+		PUSH TOZERO
+		PUSH TOZERO
+
+		POP TMP
+		POP TMP
+		POP TMP
+		POP TMP
+		POP TMP
+		POP TMP
+		POP TMP
+		POP TMP
+		POP TMP
+		POP TMP
+		POP TMP
+
+		END  begin
+		
