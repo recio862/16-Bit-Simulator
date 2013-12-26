@@ -15,6 +15,7 @@ Use:
         Option 2: ./pdp16429 -V filename 
         
    Option 1 will produce the output from standard IOT instructions
+   
    Option 2 will produce the verbose output, displaying each cycle and instruction from the PC.
     Verbose mode prints one line for each instruction executed, and it includes:
     The time (in cycles) after each instruction is executed.
