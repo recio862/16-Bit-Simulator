@@ -16,8 +16,17 @@ Use:
         
    Option 1 will produce the output from standard IOT instructions
    Option 2 will produce the verbose output, displaying each cycle and instruction from the PC.
-     
+    Verbose mode prints one line for each instruction executed, and it includes:
+    The time (in cycles) after each instruction is executed.
+    The PC of the instruction executed.
+    The hex of the entire instruction executed.
+    The symbolic opcode(s) of the instruction executed.
+    The names and values of all memory and registers that are referenced by the exection of the instruction. 
+    Each instruction takes 1 cycle for every memory reference (including the instruction fetch), but no additional       time for any computation. So, time is dominated by just the memory fetch time. 
+  
+  
   Note: filename must be of type .obj produced by the assembler
+  
 
 ===================
 
