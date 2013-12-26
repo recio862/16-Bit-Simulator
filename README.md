@@ -1,7 +1,7 @@
 16-Bit-Simulator
 ================
 
-This is a project designed by our Computer Architecture group. 
+This is a project designed by our 429 Computer Architecture group. 
 
 Use:
 1. Run the assembler using a single .asm file as input.
