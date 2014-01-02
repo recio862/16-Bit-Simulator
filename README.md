@@ -6,6 +6,7 @@ This is a project designed by our 429 Computer Architecture group.
 Use:
 1. Run the assembler using a single .asm file as input.
 
+
 2. Run the PDP16429 using the .obj file produced by the assembler. 
 
        Command line includes:
